@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import base64
+import io
+import os
+import re
+import sys
+import argparse
+import logging
+
+# etree
+try:
+    from lxml import etree
+except:
+    from xml import etree
+
+# http client
+try:
+    import http.client as http_client
+except:
+    import httplib as http_client
+
+from mutagen.flac import FLAC
+
+CONFIG = "{}/.config/pygrace.ini".format(os.getenv("HOME"))
+
+CLIENT_ID = b'MTA2ODEzNDQtRjI3QkRFNzI2NEYyNTJBRkQwMUFFMDVCREFGNDNDOEQ='
+USER_ID = None
+
+
+class PyGrace:
+    def __init__(self, client_id=CLIENT_ID, user_id=USER_ID):
+        self.client_id = client_id
+        self.user_id = user_id
+        self.url = 'c' + client_id.split(str('-'))[0] + '.web.cddbp.net'
+
+        if self.user_id is None:
+            self.user_id = self._initialize_user_id()
+        return
+
+    def search(self, toc_input):
+        # Search metadata
+        # generate query
+        root = etree.Element('QUERIES')
+
+        # auth tree
+        auth = etree.Element('AUTH')
+
+        client = etree.Element('CLIENT')
+        client.text = self.client_id
+        auth.append(client)
+
+        user = etree.Element('USER')
+        user.text = self.user_id
+        auth.append(user)
+        root.append(auth)
+
+        # query tree
+        query = etree.Element('QUERY', attrib={'CMD': 'ALBUM_TOC'})
+
+        mode = etree.Element('MODE')
+        mode.text = 'SINGLE_BEST'
+
+        toc = etree.Element('TOC')
+        offsets = etree.Element('OFFSETS')
+        offsets.text = toc_input
+        toc.append(offsets)
+
+        query.append(mode)
+        query.append(toc)
+        root.append(query)
+
+        query = etree.tounicode(root, method='xml', pretty_print=True)
+
+        # send_query
+        resp = self._send_query(query)
+        return resp
+
+    def _initialize_user_id(self):
+        # Initialize gracenote user id
+        # generate query
+        root = etree.Element('QUERIES')
+
+        query = etree.Element('QUERY', attrib={'CMD': 'REGISTER'})
+        client = etree.Element('CLIENT')
+        client.text = self.client_id
+        query.append(client)
+
+        root.append(query)
+
+        q = etree.tounicode(root, method='xml', pretty_print=True)
+
+        # send query
+        resp = self._send_query(q)
+
+        # parsing response to get user id
+        root = etree.fromstring(resp)
+        try:
+            user = root.find('RESPONSE').find('USER')
+            return user.text
+        except Exception as e:
+            logging.error("pygrace._initialize_user_id():")
+            logging.error("bad request")
+            logging.error(e)
+        return
+
+    def _send_query(self, query):
+        logging.info("pygrace: send_query")
+        headers = {'Content-type': 'application/xml',
+                   'Accept': 'application/xml'}
+        url = '/webapi/xml/1.0/'
+
+        conn = http_client.HTTPSConnection(self.url, port=443)
+        conn.request(method='POST',
+                     url=url,
+                     body=query,
+                     headers=headers)
+
+        response = conn.getresponse()
+        data = response.read()
+
+        return data
+
+
+class GraceParse:
+    def __init__(self, xml):
+        self.xml = xml
+
+        # initialize internal variable
+        self.artist = ""
+        self.title = ""
+        self.date = ""
+        self.genre = ""
+        self.tracks = {}
+
+    def parse(self):
+        root = etree.fromstring(self.xml)
+        resp_status = root.find('RESPONSE').attrib['STATUS']
+        if resp_status == 'OK':
+            media = root.find('RESPONSE').find('ALBUM')
+            # artist
+            self.artist = media.find('ARTIST').text
+            logging.debug("self.artist = " + self.artist)
+            # title
+            self.title = media.find('TITLE').text
+            logging.debug("self.title = " + self.title)
+            # date
+            try:
+                self.date = media.find('DATE').text
+                logging.debug("self.date = " + self.date)
+            except Exception as e:
+                logging.warn("pygrace: date is unknown")
+                logging.info(e)
+                self.date = None
+            # genre
+            try:
+                self.genre = media.find('GENRE').text
+                logging.debug("self.genre = " + self.genre)
+            except Exception as e:
+                logging.warn("pygrace: genre is unknown")
+                logging.info(e)
+                self.genre = "unknown"
+            # tracks
+            for track in media.findall('TRACK'):
+                num = track.find('TRACK_NUM').text
+                try:
+                    artist = track.find('ARTIST').text
+                except:
+                    artist = self.artist
+                title = track.find('TITLE').text
+
+                track = {"artist": artist,
+                         "title": title}
+
+                self.tracks['{0:0>2}'.format(num)] = track
+
+        elif resp_status == 'NO_MATCH':
+            sys.stderr.write("pygrace: cannnot associate input file")
+            sys.stderr.write("pygrace: gracenote response is no match")
+            logging.info("resp:\n")
+            logging.info(self.xml)
+            sys.exit(1)
+
+    def write_file(self, ifp, ofp):
+        # patterns
+        patterns = {}
+        no_process = ['PERFORMER', 'TITLE', 'DATE', 'GENRE', 'FILE']
+        # performer
+        patterns['PERFORMER'] = [
+            r'^PERFORMER\s+(.*)',
+            'PERFORMER "{}"\n'.format(self.artist),
+        ]
+        # title
+        patterns['TITLE'] = [
+            r'^TITLE\s+(.*)',
+            'TITLE "{}"\n'.format(self.title),
+        ]
+        # date
+        patterns['DATE'] = [
+            r'^REM\s+DATE\s+(.*)',
+            'REM DATE {}\n'.format(self.date),
+        ]
+        # genre
+        patterns['GENRE'] = [
+            r'^REM\s+GENRE\s+(.*)',
+            'REM GENRE "{}"\n'.format(self.genre),
+        ]
+        # file
+        patterns['FILE'] = [
+            r'^FILE\s+.*',
+            'FILE "file.flac" WAVE\n',
+        ]
+        # tracks
+        patterns['TRACK'] = [
+            r'\s+TRACK\s+(\d{2})\s+AUDIO',
+            '',
+        ]
+        patterns['TRACK_TITLE'] = [
+            r'\s+TITLE\s+".*"',
+            '',
+        ]
+        patterns['TRACK_PERFORMER'] = [
+            r'\s+PERFORMER\s+".*"',
+            '',
+        ]
+        patterns['INDEX'] = [
+            r'\s+INDEX\s+\d{2}\s+\d{2}:\d{2}:\d{2}',
+            '',
+        ]
+        patterns['ISRC'] = [
+            r'\s+ISRC\s+\S+',
+            '',
+        ]
+        # other
+        patterns['_OTHER'] = [
+            r'.*',
+            '',
+        ]
+
+        ios = io.StringIO()
+        others = []
+
+        for line in ifp:
+            for name in sorted(patterns):
+                pattern = patterns[name][0]
+                matches = re.match(pattern, line)
+                if matches:
+                    if name in ['PERFORMER', 'TITLE', 'DATE', 'GENRE']:
+                        break
+                    elif len(no_process) != 0 and name == "OTHER":
+                        others.append(line)
+
+                    # basic metadata
+                    if name == 'FILE':
+                        ios.write(patterns['PERFORMER'][1])
+                        ios.write(patterns['TITLE'][1])
+                        ios.write(patterns['DATE'][1])
+                        ios.write(patterns['GENRE'][1])
+                        ios.write(patterns['FILE'][1])
+                        no_process = []
+                        for other in others:
+                            ios.write(other)
+                    # track
+                    if name == 'TRACK':
+                        number = matches.group(1)
+                        # number
+                        ios.write("  TRACK {} AUDIO\n".format(number))
+                        # title
+                        ios.write("    TITLE \"{}\"\n".format(
+                            self.tracks[number]["title"]
+                        ))
+                        # artist
+                        ios.write("    PERFORMER \"{}\"\n".format(
+                            self.tracks[number]["artist"]
+                        ))
+
+                    elif name in ['TRACK_TITLE', 'TRACK_PERFORMER']:
+                        # ignore
+                        pass
+
+                    elif (name == 'INDEX' or name == 'ISRC'):
+                        ios.write(line)
+
+        ofp.write(ios.getvalue().strip())
+        # write eof
+        ofp.write("\n")
+        ios.close()
+        return
+
+    def custom(self):
+        # album_name
+        album_name = self.date
+        ls = self.title.split(sep=' ')
+        for _, part in enumerate(ls):
+            album_name = '{}{}{}'.format(
+                album_name,
+                part[0].upper(),
+                part[1:].lower()
+            )
+
+        # delete single quote
+        album_name = album_name.replace('\'', '')
+
+        # display messages
+        logging.info("info message:")
+        logging.info("Album name: " + album_name)
+        logging.info("Artist: " + self.artist)
+
+        # mkdir
+        os.mkdir("./" + album_name)
+        # move
+        os.rename("./file.toc", album_name + "/" + "file.toc")
+        os.rename("./file.cue", album_name + "/" + "file.cue")
+        os.rename("./file.flac", album_name + "/" + "file.flac")
+        return
+
+
+# Utils
+def calculate_toc(input):
+    # pattern example: "INDEX 01 00:00:00"
+    pattern = re.compile('INDEX 01 (\d{2}):(\d{2}):(\d{2})')
+
+    toc = ''
+
+    # calculate toc
+    for line in input:
+        line = line.strip()
+        m = re.match(pattern, line)
+        if m:
+            frame = 0
+            frame += (int(m.group(1)) * 60 + int(m.group(2))) * 75
+            frame += int(m.group(3)) + 150
+            toc = '{} {}'.format(toc, frame)
+
+    base, _ = os.path.splitext(input.name)
+    filename = '{}.{}'.format(base, 'flac')
+    length = int(FLAC(filename).info.length)
+    frame = length * 75 + 150
+    toc = '{} {}'.format(toc, frame)
+
+    return toc
+
+
+def read_user_id():
+    if not os.path.exists(CONFIG):
+        with open(file=CONFIG, mode="w") as f:
+            f.write("[pygrace]")
+            f.write("\n")
+            return None
+    with open(file=CONFIG, mode="r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("user_id = "):
+                user_id = line.replace("user_id = ", "")
+                return user_id
+        return None
+
+
+def _in_fileopen(fn):
+    ifp = open(file=fn, mode='r', encoding='utf-8')
+    return ifp
+
+
+def _out_fileopen(fn):
+    ofp = open(file=fn, mode='w', encoding='utf-8')
+    return ofp
+
+
+# Parse args
+def parse_args():
+    description = 'Pygrace is automaticaly tagging from GraceNote CDDB.'
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('input',
+                        metavar='INPUT FILE',
+                        type=_in_fileopen, nargs=1,
+                        help='input cuesheet')
+    parser.add_argument('-o', '--output',
+                        metavar='OUTPUT FILE',
+                        type=_out_fileopen, nargs=1,
+                        help='output cuesheet')
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        dest='verbose')
+    parser.add_argument('-vv',
+                        action='store_true',
+                        dest='debug')
+    parser.add_argument('--custom',
+                        action='store_true',
+                        dest='custom')
+    args = parser.parse_args()
+    return args
+
+
+# Main
+if __name__ == '__main__':
+    # parse args
+    args = parse_args()
+
+    input = args.input[0]
+    output = args.output[0]
+    verbose = args.verbose
+    debug = args.debug
+    custom = args.custom
+
+    # logging level
+    if verbose:
+        logging.basicConfig(level=logging.INFO)
+    elif debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.WARN)
+
+    # main
+    client_id = base64.b64decode(CLIENT_ID).decode('utf-8')
+    user_id = read_user_id()
+
+    g = PyGrace(client_id=client_id, user_id=user_id)
+    if user_id is None:
+        with open(file=CONFIG, mode='a') as f:
+            f.write("user_id = {}".format(g.user_id))
+            f.write("\n")
+
+    toc = calculate_toc(input=input)
+
+    resp = g.search(toc)
+    for line in resp.decode('utf-8').split('\n'):
+        logging.debug(line)
+
+    gp = GraceParse(resp)
+    gp.parse()
+    input.seek(0)
+    gp.write_file(ifp=input, ofp=output)
+
+    if custom:
+        # if you need custom function it is possible to customize
+        gp.custom()
+
+    # file descriptor close
+    input.close()
+    output.close()
