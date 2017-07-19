@@ -24,7 +24,7 @@ from mutagen.flac import FLAC
 
 CONFIG = "{}/.config/pygrace.ini".format(os.getenv("HOME"))
 
-CLIENT_ID = b'MTA2ODEzNDQtRjI3QkRFNzI2NEYyNTJBRkQwMUFFMDVCREFGNDNDOEQ='
+CLIENT_ID = b'MTY0Mzk1NTItMzM5MTc0NDc2M0I4NzMyODUzODE1RDMwNDg0MDU0RkIK'
 
 
 class PyGrace:
