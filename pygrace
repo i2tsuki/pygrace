@@ -28,8 +28,8 @@ CLIENT_ID = b'MTY0Mzk1NTItMzM5MTc0NDc2M0I4NzMyODUzODE1RDMwNDg0MDU0RkIK'
 
 
 class PyGrace:
-        self.client_id = client_id
     def __init__(self, client_id=CLIENT_ID, user_id=None):
+        self.client_id = client_id.strip()
         self.user_id = user_id
         self.url = 'c' + client_id.split(str('-'))[0] + '.web.cddbp.net'
 
