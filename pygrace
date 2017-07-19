@@ -69,7 +69,9 @@ class PyGrace:
         query.append(toc)
         root.append(query)
 
-        query = etree.tounicode(root, method='xml', pretty_print=True)
+        query = etree.tostring(root, method='xml',
+                             encoding='unicode',
+                             pretty_print=True)
 
         # send_query
         resp = self._send_query(query)
@@ -87,8 +89,9 @@ class PyGrace:
 
         root.append(query)
 
-        q = etree.tounicode(root, method='xml', pretty_print=True)
-
+        q = etree.tostring(root, method='xml',
+                           encoding='unicode',
+                           pretty_print=True)
         # send query
         resp = self._send_query(q)
 
