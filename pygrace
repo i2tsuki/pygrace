@@ -170,15 +170,18 @@ class GraceParse:
                 except:
                     artist = self.artist
                 title = track.find('TITLE').text
-
                 track = {"artist": artist,
                          "title": title}
-
                 self.tracks['{0:0>2}'.format(num)] = track
 
         elif resp_status == 'NO_MATCH':
-            sys.stderr.write("pygrace: cannnot associate input file")
-            sys.stderr.write("pygrace: gracenote response is no match")
+            sys.stderr.write("pygrace: cannot associate input file\n")
+            sys.stderr.write("pygrace: gracenote response is no match\n")
+            logging.info("resp:\n")
+            logging.info(self.xml)
+            sys.exit(1)
+        elif resp_status == 'ERROR':
+            sys.stderr.write("pygrace: gracenote response is not available\n")
             logging.info("resp:\n")
             logging.info(self.xml)
             sys.exit(1)
